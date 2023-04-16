@@ -1,0 +1,7 @@
+minAutoDuration: 5m
+minManualDuration: 30m
+maxNoncritDuration: 6h
+maxCritDuration: null
+deadlineDuration: 672h
+preferredManualStartMult: 5m
+preferredAutoStartMult: 1m

@@ -1,0 +1,20 @@
+whiteList:
+  dev1:
+  - 00:00-23:59
+  dev2:
+  - 00:00-06:00
+  - 22:00-23:59
+  dev3:
+  - 00:00-04:00
+blackList:
+- prod1
+- prod2
+- preprod1
+availableZones: 2
+pauses:
+  dev1: 5m
+  dev2: 5m
+  dev3: 10m
+  prod1: 30m
+  prod2: 60m
+  preprod1: 30m
