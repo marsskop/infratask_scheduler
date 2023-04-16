@@ -3,7 +3,10 @@
 Scheduler for inftrastructure tasks. Done for [IT's Tinkoff Solution Cup](https://www.tinkoff.ru/solutioncup/).
 
 ## Key Features
-
+- upload and schedule tasks depending on their priority (critical - 0, manual noncritical - 1, auto -2)
+- cancel tasks
+- extend tasks duration
+- move tasks
 
 ## How to Run
 ### Run in Docker
