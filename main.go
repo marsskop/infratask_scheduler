@@ -60,6 +60,9 @@ func loadWhiteList() error {
 			if err != nil {
 				return fmt.Errorf("configuration error:%s", err.Error())
 			}
+			if start.After(end) {
+				end = end.Add(time.Hour * 24)
+			}
 			timeSpans = append(timeSpans, timeSpan{
 				Start: start,
 				End: end,
@@ -101,7 +104,7 @@ func addTask(w http.ResponseWriter, r *http.Request) {
 		log.Warn(err)
 		return
 	}
-	deadline, err := time.Parse("02/01/2006", addTaskReq.Deadline)
+	deadline, err := time.Parse("02/01/2006 15:04", addTaskReq.Deadline)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		log.Warn(err)
@@ -315,6 +318,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 func main() {
 	debug := flag.Bool("debug", false, "Debug mode")
 	port := flag.Int("port", 8080, "Server port")
+	configsDir := flag.String("configs", "./configs", "Configurations directory")
 	flag.Parse()
 	if *debug {
 		log.SetLevel(log.DebugLevel)
@@ -322,7 +326,7 @@ func main() {
 	}
 
 	// load durations config
-	viper.AddConfigPath("./configs")
+	viper.AddConfigPath(*configsDir)
 	viper.SetConfigName("durations")
 	viper.SetConfigType("yaml")
 	if err := viper.ReadInConfig(); err != nil {
@@ -336,7 +340,7 @@ func main() {
 	log.Debug("Durations config loaded:\n", durations)
 
 	// load common reloadable config
-	viper.AddConfigPath("./configs")
+	viper.AddConfigPath(*configsDir)
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	if err := viper.ReadInConfig(); err != nil {

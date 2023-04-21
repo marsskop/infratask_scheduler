@@ -72,7 +72,7 @@ Options are:
 - **whiteList**: map of lists of timespans for tasks in zones
 - **blackList**: list of zones in which only critical tasks can be run
 - **availableZones**: number of zones that don't have any tasks at any time
-- **pauses**: map of pauses between tasks in zone
+- **pauses**: map of pauses between tasks in zone; fill in with `${zone}: 0m` if pauses are zero.
 
 
 ## API Endpoints
@@ -117,7 +117,7 @@ Example request:
 {
     "StartDatetime": "17/04/2023 02:15",
     "Duration": "4h",
-    "Deadline": "26/04/2023",
+    "Deadline": "26/04/2023 00:00",
     "Zones": ["dev1"],
     "Type": "manual",
     "Critical": true

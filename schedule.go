@@ -17,6 +17,18 @@ func priorityRule(typeStr string, critical bool) int {
 	return 2
 }
 
+func removeDuplicateTime(timeSlice []time.Time) []time.Time {
+    allKeys := make(map[time.Time]bool)
+    list := []time.Time{}
+    for _, item := range timeSlice {
+        if _, value := allKeys[item]; !value {
+            allKeys[item] = true
+            list = append(list, item)
+        }
+    }
+    return list
+}
+
 type Task struct {
 	ID string
 	StartDatetime time.Time
@@ -78,10 +90,62 @@ func overlap(start1 time.Time, end1 time.Time, start2 time.Time, end2 time.Time)
 	if start1.After(start2) {
 		return overlap(start2, end2, start1, end1)
 	}
-	if !end1.Before(start2) {
+	if end1.After(start2) {
 		return true
 	}
 	return false
+}
+
+func countUnavailableZones(zone string, startTime time.Time, endTime time.Time) int {
+	unavailableZones := 0
+	splits := []time.Time{}
+	overlapIdxs := make(map[string][]int)
+	for whiteListZone, _ := range config.WhiteList {
+		if zone == whiteListZone {
+			unavailableZones += 1
+		} else {
+			zoneSchedule, ok := schedule[whiteListZone]
+			if ok {
+				for i := range zoneSchedule {
+					schedTask := tasks[zoneSchedule[i]]
+					if schedTask.StartDatetime.After(startTime) && schedTask.StartDatetime.Before(endTime) {
+						splits = append(splits, schedTask.StartDatetime)
+					}
+					if schedTask.StartDatetime.Add(schedTask.Duration).After(startTime) && schedTask.StartDatetime.Add(schedTask.Duration).Before(endTime) {
+						splits = append(splits, schedTask.StartDatetime.Add(schedTask.Duration))
+					}
+					if overlap(schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration), startTime, endTime) {
+						overlapIdxs[whiteListZone] = append(overlapIdxs[whiteListZone], i)
+					}
+				}
+			}
+		}
+	}
+	splits = removeDuplicateTime(splits)
+	unavailablePerSplit := make([]int, len(splits))
+	for i, split := range splits {
+		startSplitTime := startTime
+		endSplitTime := split
+		if i != 0 {
+			startSplitTime = splits[i-1]
+		}
+		for zone, idxs := range overlapIdxs {
+			for _, idx := range idxs {
+				schedTask := tasks[schedule[zone][idx]]
+				if overlap(startSplitTime, endSplitTime, schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration)) {
+					unavailablePerSplit[i] += 1
+				}
+			}
+		}
+	}
+	maxUnavailable := 0
+	for _, value := range unavailablePerSplit {
+		if value > maxUnavailable {
+			maxUnavailable = value
+		}
+	}
+	unavailableZones += maxUnavailable
+	return unavailableZones
 }
 
 func availableTimeZone(task *Task) error {
@@ -101,36 +165,26 @@ func availableTimeZone(task *Task) error {
 				}
 			}
 		}
-		availableZones := len(config.WhiteList)
 		for whiteListZone, zoneTimeSpans := range config.WhiteList {
 			if zone == whiteListZone {
-				availableZones -= 1
 				zoneExists = true
 				valid := false
 				for _, timeSpan := range zoneTimeSpans {
 					log.Debug(fmt.Sprintf("Comparing timespans... startTime: %v, endTime: %v, timeSpan: %v", startTimeConverted, endTimeConverted, timeSpan))
-					if startTimeConverted.After(timeSpan.Start) && endTimeConverted.Before(timeSpan.End) {
+					if !startTimeConverted.Before(timeSpan.Start) && !endTimeConverted.After(timeSpan.End) {
+						valid = true
+					}
+					if !startTimeConverted.Add(time.Hour * 24).Before(timeSpan.Start) && !endTimeConverted.Add(time.Hour * 24).After(timeSpan.End) {
 						valid = true
 					}
 				}
 				if !valid {
 					return fmt.Errorf("does not match any timespan in zone: %s", zone)
 				}
-			} else {
-			 	// ensure that there are at least config.availableZones available
-				zoneSchedule, ok := schedule[whiteListZone]
-				if ok {
-					for i := range zoneSchedule {
-						schedTask := tasks[zoneSchedule[i]]
-						if overlap(schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration), startTime, endTime) {
-							availableZones -= 1
-							break
-						}
-					}
-				}
 			}
 		}
-		if availableZones < config.AvailableZones {
+		unavailableZones := countUnavailableZones(zone, startTime, endTime)
+		if len(config.WhiteList) - unavailableZones  < config.AvailableZones {
 			return fmt.Errorf("can't schedule task; %d zones should be available at all times", config.AvailableZones)
 		}
 		if !zoneExists {
@@ -156,7 +210,7 @@ func availablePrioritizedTimespan(task *Task, zone string) (Order, error) {
 			if overlap(schedTaskStart, schedTaskEnd, task.StartDatetime, task.StartDatetime.Add(task.Duration)) {
 				overlaps = append(overlaps, i)
 			}
-			if task.StartDatetime.After(schedTaskEnd) {
+			if !task.StartDatetime.Before(schedTaskEnd) {
 				startIdx = i + 1
 			}
 		}
@@ -167,14 +221,14 @@ func availablePrioritizedTimespan(task *Task, zone string) (Order, error) {
 			return order, nil
 		}
 		// there are overlaps; check priorities and status (if "cancel", then the task is set for cancellation/extension/move)
-		for i := range overlaps {
+		for _, i := range overlaps {
 			schedTask := tasks[zoneSchedule[i]]
 			if schedTask.Priority <= task.Priority && schedTask.Status != "cancel" {
 				return order, fmt.Errorf("can't schedule task; overlap in zone %s with task with priority %d %s (%s, critical: %v), %v-%v", zone, schedTask.Priority, schedTask.ID, schedTask.Type, schedTask.Critical, schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration))
 			}
 		}
 		// no priority overlaps; cancel less prioritized overlapping tasks
-		for i := range overlaps {
+		for _, i := range overlaps {
 			order.cancelTaskIds = append(order.cancelTaskIds, tasks[zoneSchedule[i]].ID)
 		}
 	}
