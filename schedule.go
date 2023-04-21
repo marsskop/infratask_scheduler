@@ -5,6 +5,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"go.uber.org/multierr"
 )
 
 func priorityRule(typeStr string, critical bool) int {
@@ -96,25 +97,25 @@ func overlap(start1 time.Time, end1 time.Time, start2 time.Time, end2 time.Time)
 	return false
 }
 
-func countUnavailableZones(zone string, startTime time.Time, endTime time.Time) int {
-	unavailableZones := 0
+func countUnavailableZones(taskCount int, zone string, startTime time.Time, endTime time.Time) int {
+	unavailableZones := taskCount
 	splits := []time.Time{}
 	overlapIdxs := make(map[string][]int)
 	for whiteListZone, _ := range config.WhiteList {
-		if zone == whiteListZone {
-			unavailableZones += 1
-		} else {
+		if zone != whiteListZone {
 			zoneSchedule, ok := schedule[whiteListZone]
 			if ok {
 				for i := range zoneSchedule {
 					schedTask := tasks[zoneSchedule[i]]
-					if schedTask.StartDatetime.After(startTime) && schedTask.StartDatetime.Before(endTime) {
+					schedStart := schedTask.StartDatetime
+					schedEnd := schedTask.StartDatetime.Add(schedTask.Duration)
+					if schedStart.After(startTime) && schedStart.Before(endTime) {
 						splits = append(splits, schedTask.StartDatetime)
 					}
-					if schedTask.StartDatetime.Add(schedTask.Duration).After(startTime) && schedTask.StartDatetime.Add(schedTask.Duration).Before(endTime) {
+					if schedEnd.After(startTime) && schedEnd.Before(endTime) {
 						splits = append(splits, schedTask.StartDatetime.Add(schedTask.Duration))
 					}
-					if overlap(schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration), startTime, endTime) {
+					if overlap(schedStart, schedEnd, startTime, endTime) {
 						overlapIdxs[whiteListZone] = append(overlapIdxs[whiteListZone], i)
 					}
 				}
@@ -171,10 +172,10 @@ func availableTimeZone(task *Task) error {
 				valid := false
 				for _, timeSpan := range zoneTimeSpans {
 					log.Debug(fmt.Sprintf("Comparing timespans... startTime: %v, endTime: %v, timeSpan: %v", startTimeConverted, endTimeConverted, timeSpan))
-					if !startTimeConverted.Before(timeSpan.Start) && !endTimeConverted.After(timeSpan.End) {
+					if overlap(startTimeConverted, endTimeConverted, timeSpan.Start, timeSpan.End) {
 						valid = true
 					}
-					if !startTimeConverted.Add(time.Hour * 24).Before(timeSpan.Start) && !endTimeConverted.Add(time.Hour * 24).After(timeSpan.End) {
+					if overlap(startTimeConverted.Add(time.Hour * 24), endTimeConverted.Add(time.Hour * 24), timeSpan.Start, timeSpan.End) {
 						valid = true
 					}
 				}
@@ -183,7 +184,7 @@ func availableTimeZone(task *Task) error {
 				}
 			}
 		}
-		unavailableZones := countUnavailableZones(zone, startTime, endTime)
+		unavailableZones := countUnavailableZones(len(task.Zones), zone, startTime, endTime)
 		if len(config.WhiteList) - unavailableZones  < config.AvailableZones {
 			return fmt.Errorf("can't schedule task; %d zones should be available at all times", config.AvailableZones)
 		}
@@ -220,7 +221,7 @@ func availablePrioritizedTimespan(task *Task, zone string) (Order, error) {
 			order.addIdx = startIdx
 			return order, nil
 		}
-		// there are overlaps; check priorities and status (if "cancel", then the task is set for cancellation/extension/move)
+		// there are overlaps; check priorities and status (if "cancel", then the task is set for cancellation/extension/rescheduling)
 		for _, i := range overlaps {
 			schedTask := tasks[zoneSchedule[i]]
 			if schedTask.Priority <= task.Priority && schedTask.Status != "cancel" {
@@ -260,11 +261,13 @@ func scheduleTask(task *Task) error {
 
 	err := availableTimeZone(task)
 	if err != nil {
+		task.Status = status
 		return err
 	}
 	
 	err = availableTimespan(task)
 	if err != nil {
+		task.Status = status
 		return err
 	}
 	task.Status = status
@@ -272,7 +275,15 @@ func scheduleTask(task *Task) error {
 	return nil
 }
 
-func reschedule() error {
-	// TODO: rescheduler "cancels" all tasks and recreates schedule
-	return nil
+func reschedule() (errors error) {
+	for taskID := range tasks {
+		cancelTask(taskID)
+	}
+	for _, task := range tasks {
+		err := scheduleTask(task)
+		if err != nil {
+			errors = multierr.Append(errors, fmt.Errorf("%s: %w", task.ID,  err))
+		}
+	}
+	return errors
 }

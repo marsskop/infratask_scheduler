@@ -291,10 +291,11 @@ func moveTask(w http.ResponseWriter, r *http.Request) {
 			log.Warn("Can only move tasks in wait", taskID)
 			return
 		}
-		cancelTask(taskID)
+		startDatetime := task.StartDatetime
 		task.StartDatetime = newStartDatetime
 		err := scheduleTask(task)
 		if err != nil {
+			task.StartDatetime = startDatetime
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			log.Warn(err)
 			return
@@ -368,7 +369,10 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Debug("Config loaded:\n", config)
-		reschedule()
+		err = reschedule()
+		if err != nil {
+			log.Warn(fmt.Sprintf("Rescheduling errors: %s", err.Error()))
+		}
 	})
 
 	router := mux.NewRouter()
