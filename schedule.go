@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"time"
+	"sort"
 
 	log "github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
@@ -95,6 +96,86 @@ func overlap(start1 time.Time, end1 time.Time, start2 time.Time, end2 time.Time)
 		return true
 	}
 	return false
+}
+
+func pointsOfInterestTime() []time.Time {
+	// merge starttimes and endtimes from all zones
+	pointsTime := []time.Time{}
+	for zone := range config.WhiteList {
+		zoneSchedule, ok := schedule[zone]
+		if ok {
+			for i := range zoneSchedule {
+				pointsTime = append(pointsTime, tasks[zoneSchedule[i]].StartDatetime)
+				pointsTime = append(pointsTime, tasks[zoneSchedule[i]].StartDatetime.Add(tasks[zoneSchedule[i]].Duration))
+			}
+		}
+	}
+	pointsTime = removeDuplicateTime(pointsTime)
+
+	// merge all timezone whitelist times
+	configZonePoints := []time.Time{}
+	for _, timeSpans := range config.WhiteList {
+		for _, timeSpan := range timeSpans {
+			configZonePoints = append(configZonePoints, timeSpan.Start)
+			configZonePoints = append(configZonePoints, timeSpan.End)
+		}
+	}
+	configZonePoints = removeDuplicateTime(configZonePoints)
+
+	// sort to get the earliest and latest and add timezone work start times
+	sort.Slice(pointsTime, func(i, j int) bool {
+		return pointsTime[i].Before(pointsTime[j])
+	})
+	pointsTime = removeDuplicateTime(pointsTime)
+	earliest := pointsTime[0]
+	latest := pointsTime[len(pointsTime) - 1]
+	for day := 0; day < int(latest.Sub(earliest).Hours()) / 24 + 1; day++ {
+		earliest = earliest.Add(time.Hour * 24)
+		for _, zonePoint := range configZonePoints {
+			pointsTime = append(pointsTime, time.Date(earliest.Year(), earliest.Month(), earliest.Day(), zonePoint.Hour(), zonePoint.Minute(), zonePoint.Second(), zonePoint.Nanosecond(), zonePoint.Location()))
+		}
+	}
+
+	// resulting sort
+	sort.Slice(pointsTime, func(i, j int) bool {
+		return pointsTime[i].Before(pointsTime[j])
+	})
+	return pointsTime
+}
+
+func suggestTime(task Task) (suggestion string) {
+	dummyTask := task
+
+	// create slice with points of interest (merge times from all zones, insert starts of available time zone times) and sort
+	pointsTime := pointsOfInterestTime()
+	fmt.Println(pointsTime)
+
+	// split tasks
+	for _, zone := range task.Zones {
+		for _, point := range pointsTime {
+			if point.Before(task.StartDatetime) {
+				continue
+			}
+			dummyTask.StartDatetime = point
+			fmt.Println("POINT ", point)
+			err := availableTimeZone(&dummyTask)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			_, err = availablePrioritizedTimespan(&dummyTask, zone)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			suggestion += fmt.Sprintf("- %s: %s - %s\n", zone, point.Format("02/01/2006 15:04"), point.Add(task.Duration).Format("02/01/2006 15:04"))
+			break
+		}
+	}
+	if suggestion == "" {
+		return "Task requested REJECTED; no matching timespan available."
+	}
+	return "Please review suggested timespans:\n" + suggestion
 }
 
 func countUnavailableZones(taskCount int, zone string, startTime time.Time, endTime time.Time) int {
