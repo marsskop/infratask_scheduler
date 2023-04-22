@@ -242,8 +242,10 @@ func extendTask(w http.ResponseWriter, r *http.Request) {
 			task.Duration = newDuration
 			err := scheduleTask(task)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				log.Warn(err)
+				suggestion := suggestTime(*task)
+				suggestion = err.Error() + "\n" + suggestion
+				http.Error(w, suggestion, http.StatusBadRequest)
+				log.Warn(suggestion)
 				return
 			}
 

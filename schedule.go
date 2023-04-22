@@ -7,6 +7,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
+	"github.com/google/uuid"
 )
 
 func priorityRule(typeStr string, critical bool) int {
@@ -40,7 +41,7 @@ type Task struct {
 	Type string // auto or manual
 	Critical bool // only for manual type
 	Priority int // 0 for critical, 1, for manual noncritical, 2 for auto
-	Status string // wait, progress, complete or cancel
+	Status string // wait, progress, suggested, complete or cancel
 }
 
 var tasks = make(map[string]*Task)
@@ -62,6 +63,11 @@ func cancelTask(taskId string) {  // tasks are cancelled in all zones specified 
 		}
 		tasks[taskId].Status = "cancel"
 	}
+}
+
+func wipeTask(taskId string) {
+	cancelTask(taskId)
+	delete(tasks, taskId)
 }
 
 func insertTask(taskId string, idx int, zone string) {
@@ -144,33 +150,44 @@ func pointsOfInterestTime() []time.Time {
 }
 
 func suggestTime(task Task) (suggestion string) {
-	dummyTask := task
-
 	// create slice with points of interest (merge times from all zones, insert starts of available time zone times) and sort
 	pointsTime := pointsOfInterestTime()
 	fmt.Println(pointsTime)
 
-	// split tasks
+	// split tasks and create dummies for each
+	dummyTasks := []string{}
 	for _, zone := range task.Zones {
+		dummyTask := task
+		dummyTask.ID = uuid.New().String()
+		dummyTasks = append(dummyTasks, dummyTask.ID)
+		dummyTask.Status = "suggested"
+		dummyTask.Zones = []string{zone}
 		for _, point := range pointsTime {
 			if point.Before(task.StartDatetime) {
 				continue
 			}
 			dummyTask.StartDatetime = point
-			fmt.Println("POINT ", point)
 			err := availableTimeZone(&dummyTask)
 			if err != nil {
 				fmt.Println(err)
 				continue
 			}
-			_, err = availablePrioritizedTimespan(&dummyTask, zone)
+			dummyOrder, err := availablePrioritizedTimespan(&dummyTask, zone)
 			if err != nil {
 				fmt.Println(err)
 				continue
 			}
+			dummyOrder.cancelTaskIds = []string{}
+			fmt.Println(dummyOrder)
+			executeOrder(dummyOrder)
+			tasks[dummyTask.ID] = &dummyTask
 			suggestion += fmt.Sprintf("- %s: %s - %s\n", zone, point.Format("02/01/2006 15:04"), point.Add(task.Duration).Format("02/01/2006 15:04"))
 			break
 		}
+	}
+	// delete all dummy tasks
+	for _, dummy := range dummyTasks {
+		wipeTask(dummy)
 	}
 	if suggestion == "" {
 		return "Task requested REJECTED; no matching timespan available."
@@ -191,10 +208,10 @@ func countUnavailableZones(taskCount int, zone string, startTime time.Time, endT
 					schedStart := schedTask.StartDatetime
 					schedEnd := schedTask.StartDatetime.Add(schedTask.Duration)
 					if schedStart.After(startTime) && schedStart.Before(endTime) {
-						splits = append(splits, schedTask.StartDatetime)
+						splits = append(splits, schedStart)
 					}
 					if schedEnd.After(startTime) && schedEnd.Before(endTime) {
-						splits = append(splits, schedTask.StartDatetime.Add(schedTask.Duration))
+						splits = append(splits, schedEnd)
 					}
 					if overlap(schedStart, schedEnd, startTime, endTime) {
 						overlapIdxs[whiteListZone] = append(overlapIdxs[whiteListZone], i)
