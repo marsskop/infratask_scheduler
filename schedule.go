@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 	"sort"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
@@ -33,15 +34,18 @@ func removeDuplicateTime(timeSlice []time.Time) []time.Time {
 }
 
 type Task struct {
-	ID string
-	StartDatetime time.Time
-	Duration time.Duration
-	Deadline time.Time
-	Zones []string
-	Type string // auto or manual
-	Critical bool // only for manual type
-	Priority int // 0 for critical, 1, for manual noncritical, 2 for auto
-	Status string // wait, progress, suggested, complete or cancel
+	ID 						string
+	Name					string
+	PreferredStartDatetime	time.Time
+	StartDatetime 			time.Time
+	Duration 				time.Duration
+	Deadline 				time.Time
+	Zones 					[]string
+	Type 					string // auto or manual
+	Critical 				bool // only for manual type
+	Priority 				int // 0 for critical, 1, for manual noncritical, 2 for auto
+	CompressionPerc 		int // from 0 to 100; for auto only
+	Status 					string // wait, suggested, cancel, change (move + extend, enables rescheduling for <= prioritized) (progress and complete in production)
 }
 
 var tasks = make(map[string]*Task)
@@ -80,18 +84,51 @@ func insertTask(taskId string, idx int, zone string) {
     schedule[zone][idx] = taskId
 }
 
+func splitTask(task Task) []string {  // splitting done for rescheduling + compression if available
+	if len(task.Zones) == 1 {
+		return []string{task.ID}
+	}
+	newTaskIds := []string{}
+	for _, zone := range task.Zones {
+		newTask := task
+		newTask.ID = uuid.New().String()
+		newTask.Zones = []string{zone}
+		newTask.StartDatetime = newTask.PreferredStartDatetime
+		newTask.Duration = time.Duration(int(task.Duration.Nanoseconds()) * (100 - task.CompressionPerc) / 100)
+		tasks[newTask.ID] = &newTask
+		newTaskIds = append(newTaskIds, newTask.ID)
+	}
+	return newTaskIds
+}
+
 type Order struct {
 	zone			string
-	cancelTaskIds 	[]string
+	reschedTaskIds 	[]string
 	addIdx			int
 	taskID			string
 }
 
 func executeOrder(order Order) {
-	for _, taskId := range order.cancelTaskIds {
+	for _, taskId := range order.reschedTaskIds {
 		cancelTask(taskId)
 	}
 	insertTask(order.taskID, order.addIdx, order.zone)
+	for _, taskId := range order.reschedTaskIds {
+		splitTaskIds := splitTask(*tasks[taskId])
+		for _, newTaskId := range splitTaskIds {
+			newTask := tasks[newTaskId]
+			points := suggestTime(*newTask)
+			if len(points) == 0 {
+				log.Warn(fmt.Sprintf("Cancelled split task %s for zone %v from parent task %s", newTaskId, newTask.Zones, taskId))
+				continue
+			}
+			newTask.StartDatetime = points[newTask.Zones[0]]
+			err := scheduleTask(tasks[newTaskId], "wait")
+			if err != nil {
+				log.Warn(fmt.Sprintf("Cancelled split task %s for zone %v from parent task %s", newTaskId, newTask.Zones, taskId))
+			}
+		}
+	}
 }
 
 func overlap(start1 time.Time, end1 time.Time, start2 time.Time, end2 time.Time) bool {
@@ -104,7 +141,7 @@ func overlap(start1 time.Time, end1 time.Time, start2 time.Time, end2 time.Time)
 	return false
 }
 
-func pointsOfInterestTime() []time.Time {
+func pointsOfInterestTime(addPoints []time.Time) []time.Time {
 	// merge starttimes and endtimes from all zones
 	pointsTime := []time.Time{}
 	for zone := range config.WhiteList {
@@ -112,10 +149,12 @@ func pointsOfInterestTime() []time.Time {
 		if ok {
 			for i := range zoneSchedule {
 				pointsTime = append(pointsTime, tasks[zoneSchedule[i]].StartDatetime)
-				pointsTime = append(pointsTime, tasks[zoneSchedule[i]].StartDatetime.Add(tasks[zoneSchedule[i]].Duration))
+				pointsTime = append(pointsTime, tasks[zoneSchedule[i]].StartDatetime.Add(tasks[zoneSchedule[i]].Duration).Add(config.Pauses[zone]))
 			}
 		}
 	}
+	// and add addPoints
+	pointsTime = append(pointsTime, addPoints...)
 	pointsTime = removeDuplicateTime(pointsTime)
 
 	// merge all timezone whitelist times
@@ -149,9 +188,14 @@ func pointsOfInterestTime() []time.Time {
 	return pointsTime
 }
 
-func suggestTime(task Task) (suggestion string) {
+func suggestTime(task Task) map[string]time.Time {
+	suggestions := make(map[string]time.Time)
 	// create slice with points of interest (merge times from all zones, insert starts of available time zone times) and sort
-	pointsTime := pointsOfInterestTime()
+	addPoints := []time.Time{task.StartDatetime}
+	for _, zone := range task.Zones {
+		addPoints = append(addPoints, task.StartDatetime.Add(task.Duration).Add(config.Pauses[zone]))
+	}
+	pointsTime := pointsOfInterestTime(addPoints)
 	fmt.Println(pointsTime)
 
 	// split tasks and create dummies for each
@@ -159,12 +203,14 @@ func suggestTime(task Task) (suggestion string) {
 	for _, zone := range task.Zones {
 		dummyTask := task
 		dummyTask.ID = uuid.New().String()
-		dummyTasks = append(dummyTasks, dummyTask.ID)
 		dummyTask.Status = "suggested"
 		dummyTask.Zones = []string{zone}
 		for _, point := range pointsTime {
 			if point.Before(task.StartDatetime) {
 				continue
+			}
+			if point.Add(task.Duration).After(task.Deadline) {
+			 	break
 			}
 			dummyTask.StartDatetime = point
 			err := availableTimeZone(&dummyTask)
@@ -177,11 +223,12 @@ func suggestTime(task Task) (suggestion string) {
 				fmt.Println(err)
 				continue
 			}
-			dummyOrder.cancelTaskIds = []string{}
+			dummyOrder.reschedTaskIds = []string{}
 			fmt.Println(dummyOrder)
 			executeOrder(dummyOrder)
 			tasks[dummyTask.ID] = &dummyTask
-			suggestion += fmt.Sprintf("- %s: %s - %s\n", zone, point.Format("02/01/2006 15:04"), point.Add(task.Duration).Format("02/01/2006 15:04"))
+			dummyTasks = append(dummyTasks, dummyTask.ID)
+			suggestions[zone] = point
 			break
 		}
 	}
@@ -189,10 +236,22 @@ func suggestTime(task Task) (suggestion string) {
 	for _, dummy := range dummyTasks {
 		wipeTask(dummy)
 	}
-	if suggestion == "" {
-		return "Task requested REJECTED; no matching timespan available."
+	if len(suggestions) < len(task.Zones) {
+		return nil
 	}
-	return "Please review suggested timespans:\n" + suggestion
+	return suggestions
+}
+
+func suggestTimeString(task Task) string {
+	points := suggestTime(task)
+	if len(points) == 0 {
+		return "Task REJECTED. No timespans are available."
+	}
+	suggestions := []string{}
+	for zone, point := range points {
+		suggestions = append(suggestions, fmt.Sprintf("  - %s: %s - %s", zone, point.Format("15:04 02/01/2006"), point.Add(task.Duration).Format("15:04 02/01/2006")))
+	} 
+	return "Please review suggested timespans:\n" + strings.Join(suggestions, "\n")
 }
 
 func countUnavailableZones(taskCount int, zone string, startTime time.Time, endTime time.Time) int {
@@ -258,6 +317,7 @@ func availableTimeZone(task *Task) error {
 		zoneExists := false
 		for _, blackListZone := range config.BlackList {
 			if zone == blackListZone {
+				fmt.Println("BLACKLIST")
 				zoneExists = true
 				if !task.Critical {
 					return fmt.Errorf("one of zones is in blackList and task is not critical: %s", zone)
@@ -315,20 +375,21 @@ func availablePrioritizedTimespan(task *Task, zone string) (Order, error) {
 		}
 		// no overlaps
 		if len(overlaps) == 0 {
-			order.cancelTaskIds = []string{}
+			order.reschedTaskIds = []string{}
 			order.addIdx = startIdx
 			return order, nil
 		}
-		// there are overlaps; check priorities and status (if "cancel", then the task is set for cancellation/extension/rescheduling)
+		// there are overlaps
+		// check priorities, status of scheduled tasks (if "cancel", then the task is set for cancellation/extension/rescheduling) and status of this task (if change, then this task can reschedule overlaps)
 		for _, i := range overlaps {
 			schedTask := tasks[zoneSchedule[i]]
-			if schedTask.Priority <= task.Priority && schedTask.Status != "cancel" {
+			if schedTask.Priority <= task.Priority && schedTask.Status != "cancel" && task.Status != "change" {
 				return order, fmt.Errorf("can't schedule task; overlap in zone %s with task with priority %d %s (%s, critical: %v), %v-%v", zone, schedTask.Priority, schedTask.ID, schedTask.Type, schedTask.Critical, schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration))
 			}
 		}
-		// no priority overlaps; cancel less prioritized overlapping tasks
+		// no priority overlaps; reschedule with compression or cancel less prioritized overlapping tasks
 		for _, i := range overlaps {
-			order.cancelTaskIds = append(order.cancelTaskIds, tasks[zoneSchedule[i]].ID)
+			order.reschedTaskIds = append(order.reschedTaskIds, tasks[zoneSchedule[i]].ID)
 		}
 	}
 	order.addIdx = startIdx
@@ -353,9 +414,9 @@ func availableTimespan(task *Task) error {
 	return nil
 }
 
-func scheduleTask(task *Task) error {
+func scheduleTask(task *Task, assignStatus string) error {
 	status := task.Status
-	task.Status = "cancel"
+	task.Status = assignStatus
 
 	err := availableTimeZone(task)
 	if err != nil {
@@ -374,13 +435,18 @@ func scheduleTask(task *Task) error {
 }
 
 func reschedule() (errors error) {
+	statuses := make(map[string]string)
 	for taskID := range tasks {
+		statuses[taskID] = tasks[taskID].Status
 		cancelTask(taskID)
 	}
 	for _, task := range tasks {
-		err := scheduleTask(task)
+		err := scheduleTask(task, "cancel")
 		if err != nil {
+			cancelTask(task.ID)
 			errors = multierr.Append(errors, fmt.Errorf("%s: %w", task.ID,  err))
+		} else {
+			task.Status = statuses[task.ID]
 		}
 	}
 	return errors

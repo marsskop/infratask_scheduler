@@ -86,7 +86,7 @@ func addTask(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal(reqBody, &addTaskReq)
 
 	// time conversion and validation
-	startDatetime, err := time.Parse("02/01/2006 15:04", addTaskReq.PreferredStartDatetime)
+	startDatetime, err := time.Parse("02/01/2006 15:04", addTaskReq.StartDatetime)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		log.Warn(err)
@@ -134,29 +134,48 @@ func addTask(w http.ResponseWriter, r *http.Request) {
 		log.Warn(err)
 		return
 	}
+	if addTaskReq.Type == "auto" && addTaskReq.CompressionPerc > 100 {
+		err = fmt.Errorf("compression precentage for auto tasks can't be more than 100")
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		log.Warn(err)
+		return
+	}
+
+	prefStartDatetime := startDatetime
+	if addTaskReq.PreferredStartDatetime != "" {
+		prefStartDatetime, err = time.Parse("02/01/2006 15:04", addTaskReq.PreferredStartDatetime)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Warn(err)
+			return
+		}
+	}
 
 	taskID := uuid.New().String()
 	task := Task{
 		ID: taskID,
+		Name: addTaskReq.Name,
+		PreferredStartDatetime: prefStartDatetime,
 		StartDatetime: startDatetime,
 		Duration: duration,
 		Deadline: deadline,
 		Zones: addTaskReq.Zones,
 		Type: addTaskReq.Type,
 		Critical: addTaskReq.Critical,
+		CompressionPerc: addTaskReq.CompressionPerc,
 		Priority: priorityRule(addTaskReq.Type, addTaskReq.Critical),
 		Status: "wait",
 	}
-	err = scheduleTask(&task)
+	tasks[task.ID] = &task
+	err = scheduleTask(&task, "wait")
 	if err != nil {
-		suggestion := suggestTime(task)
+		delete(tasks, task.ID)
+		suggestion := suggestTimeString(task)
 		suggestion = err.Error() + "\n" + suggestion
 		http.Error(w, suggestion, http.StatusBadRequest)
 		log.Warn(suggestion)
 		return
 	}
-
-	tasks[task.ID] = &task
 	w.WriteHeader(http.StatusCreated)
 
 	json.NewEncoder(w).Encode(task)
@@ -175,6 +194,7 @@ func showSchedule(w http.ResponseWriter, r *http.Request) {
 		scheduleResp[zone] = []PrettySchedule{}
 		for _, taskId := range scheduleZone {
 			prettySchedule := PrettySchedule {
+				Name: tasks[taskId].Name,
 				ID: taskId,
 				StartTime: tasks[taskId].StartDatetime.Format("15:04 02/01/2006"),
 				EndTime: tasks[taskId].StartDatetime.Add(tasks[taskId].Duration).Format("15:04 02/01/2006"),
@@ -240,9 +260,9 @@ func extendTask(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			task.Duration = newDuration
-			err := scheduleTask(task)
+			err := scheduleTask(task, "change")
 			if err != nil {
-				suggestion := suggestTime(*task)
+				suggestion := suggestTimeString(*task)
 				suggestion = err.Error() + "\n" + suggestion
 				http.Error(w, suggestion, http.StatusBadRequest)
 				log.Warn(suggestion)
@@ -251,7 +271,7 @@ func extendTask(w http.ResponseWriter, r *http.Request) {
 
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(task)
-			log.Info("Extended task %s", taskID)
+			log.Info("Extended task ", taskID)
 			return
 		} else {
 			http.Error(w, "Can only extend manual tasks in progress", http.StatusBadRequest)
@@ -297,7 +317,7 @@ func moveTask(w http.ResponseWriter, r *http.Request) {
 		}
 		startDatetime := task.StartDatetime
 		task.StartDatetime = newStartDatetime
-		err := scheduleTask(task)
+		err := scheduleTask(task, "change")
 		if err != nil {
 			task.StartDatetime = startDatetime
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -307,7 +327,7 @@ func moveTask(w http.ResponseWriter, r *http.Request) {
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(task)
-		log.Info("Moved task %s", taskID)
+		log.Info("Moved task ", taskID)
 		return
 	}
 	http.Error(w, "No task with this ID", http.StatusBadRequest)
@@ -364,6 +384,7 @@ func main() {
 	viper.WatchConfig()  // watches only the last config
 	viper.OnConfigChange(func(e fsnotify.Event) {
 		log.Info("Config file changed:", e.Name)
+		config = Config{}
 		err = viper.Unmarshal(&config)
 		if err != nil {
 			log.Fatal(err)
