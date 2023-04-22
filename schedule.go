@@ -55,7 +55,8 @@ var schedule = make(map[string]ScheduleZone)
 
 func cancelTask(taskId string) {  // tasks are cancelled in all zones specified for the task
 	log.Debug("Cancelling task ", taskId)
-	if tasks[taskId].Status != "cancel" {
+	_, ok := tasks[taskId]
+	if ok {
 		for _, zone := range tasks[taskId].Zones {
 			idx := 0
 			for i := range schedule[zone] {
@@ -254,7 +255,7 @@ func suggestTimeString(task Task) string {
 	return "Please review suggested timespans:\n" + strings.Join(suggestions, "\n")
 }
 
-func countUnavailableZones(taskCount int, zone string, startTime time.Time, endTime time.Time) int {
+func countUnavailableZones(taskCount int, zone string, priority int, startTime time.Time, endTime time.Time) int {
 	unavailableZones := taskCount
 	splits := []time.Time{}
 	overlapIdxs := make(map[string][]int)
@@ -290,7 +291,7 @@ func countUnavailableZones(taskCount int, zone string, startTime time.Time, endT
 		for zone, idxs := range overlapIdxs {
 			for _, idx := range idxs {
 				schedTask := tasks[schedule[zone][idx]]
-				if overlap(startSplitTime, endSplitTime, schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration)) {
+				if overlap(startSplitTime, endSplitTime, schedTask.StartDatetime, schedTask.StartDatetime.Add(schedTask.Duration)) && schedTask.Priority <= priority && schedTask.Status != "cancel" {
 					unavailablePerSplit[i] += 1
 				}
 			}
@@ -317,7 +318,6 @@ func availableTimeZone(task *Task) error {
 		zoneExists := false
 		for _, blackListZone := range config.BlackList {
 			if zone == blackListZone {
-				fmt.Println("BLACKLIST")
 				zoneExists = true
 				if !task.Critical {
 					return fmt.Errorf("one of zones is in blackList and task is not critical: %s", zone)
@@ -342,7 +342,7 @@ func availableTimeZone(task *Task) error {
 				}
 			}
 		}
-		unavailableZones := countUnavailableZones(len(task.Zones), zone, startTime, endTime)
+		unavailableZones := countUnavailableZones(len(task.Zones), zone, task.Priority, startTime, endTime)
 		if len(config.WhiteList) - unavailableZones  < config.AvailableZones {
 			return fmt.Errorf("can't schedule task; %d zones should be available at all times", config.AvailableZones)
 		}
@@ -441,12 +441,14 @@ func reschedule() (errors error) {
 		cancelTask(taskID)
 	}
 	for _, task := range tasks {
-		err := scheduleTask(task, "cancel")
-		if err != nil {
-			cancelTask(task.ID)
-			errors = multierr.Append(errors, fmt.Errorf("%s: %w", task.ID,  err))
-		} else {
-			task.Status = statuses[task.ID]
+		if statuses[task.ID] == "wait" {
+			err := scheduleTask(task, statuses[task.ID])
+			if err != nil {
+				cancelTask(task.ID)
+				errors = multierr.Append(errors, fmt.Errorf("%s: %w", task.ID,  err))
+			} else {
+				task.Status = statuses[task.ID]
+			}
 		}
 	}
 	return errors
