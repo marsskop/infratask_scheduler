@@ -2,6 +2,11 @@
 
 Scheduler for inftrastructure tasks. Done for [IT's Tinkoff Solution Cup](https://www.tinkoff.ru/solutioncup/).
 
+## TODO
+- [ ] enhance scheduling alorithm using Advanced Quantitative Logistis (metaheuristics, ALNS)
+- [ ] create GUI for the scheduler
+- [ ] persist data in a database
+
 ## Key Features
 - upload and schedule tasks depending on their priority (critical - 0, manual noncritical - 1, auto -2)
 - cancel tasks
@@ -251,5 +256,3 @@ Example response:
 
 ## ⚠️  License
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-
-Code is owned by Tinkoff.
